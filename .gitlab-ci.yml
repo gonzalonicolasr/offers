@@ -1,0 +1,208 @@
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+image:
+  name: 'registry.gitlab.com/telecom-argentina/devops/docker-base-images/aws_cli-helm3-kubectl-tools:latest'
+  entrypoint: [""]
+
+stages:
+   - prepare
+   - verify
+   - build
+   - validate
+   - release-to-dev
+   - promote-to-test
+   - release-to-test
+   - promote-to-prod
+   - release-to-prod
+
+variables:
+  AWS_SHARED_ACCOUNT: 890209685694
+  TEMPORAL_REGISTRY_ID: ${AWS_DEV_ACCOUNT}
+  FINAL_REGISTRY_ID: ${AWS_SHARED_ACCOUNT}
+  TEMPORAL_DOCKER_REGISTRY: "${TEMPORAL_REGISTRY_ID}.dkr.ecr.us-east-1.amazonaws.com"
+  FINAL_DOCKER_REGISTRY: "${FINAL_REGISTRY_ID}.dkr.ecr.us-east-1.amazonaws.com"
+  ECS_CLUSTER_NAME: autogestion
+
+setup-variables:
+  stage: prepare
+  script:
+    - echo "Calculando las variables del build"
+    - VERSION=$(jq -r '.version' ./package.json)-${CI_COMMIT_SHORT_SHA}
+    - TEMPORAL_IMAGE=${TEMPORAL_DOCKER_REGISTRY}/${CI_PROJECT_NAME}:${VERSION}
+    - FINAL_IMAGE=${FINAL_DOCKER_REGISTRY}/${CI_PROJECT_NAME}:${VERSION}
+    - echo "VERSION=${VERSION}" >> build.env
+    - echo "TEMPORAL_IMAGE=${TEMPORAL_IMAGE}" >> build.env
+    - echo "FINAL_IMAGE=${FINAL_IMAGE}" >> build.env
+    - echo -e "Variables:\n$(cat build.env)"
+  artifacts:
+    reports:
+      dotenv: build.env
+
+SAST-truffleHog:
+  stage: verify
+  rules:
+    - when: always
+
+docker-linter:
+  stage: verify
+  rules:
+    - when: always
+
+unit-test:
+  stage: verify
+  image: node:18.12-bullseye-slim
+  script:
+    - npm ci
+    - npm run test:all
+  artifacts:
+    when: always
+    paths:
+      - results
+    reports:
+      junit:
+        - results/unit-tests.xml
+        - results/e2e-tests.xml
+
+build-and-push-image:
+  stage: build
+  before_script:
+    - USED_AWS_ACCOUNT=${AWS_DEV_ACCOUNT}
+    - USED_DOCKER_REGISTRY=${TEMPORAL_DOCKER_REGISTRY}
+    - !reference [.aws-login, script]
+  script:
+    - echo Construyendo la imagen ${VERSION}
+    - docker build --tag ${TEMPORAL_IMAGE} .
+    - echo Publicando la imagen a la registry ${TEMPORAL_DOCKER_REGISTRY}
+    - aws ecr describe-repositories --registry-id "${TEMPORAL_REGISTRY_ID}" --repository-names ${CI_PROJECT_NAME} || aws ecr create-repository --repository-name ${CI_PROJECT_NAME} --image-tag-mutability MUTABLE --image-scanning-configuration scanOnPush=true && aws ecr set-repository-policy --repository-name ${CI_PROJECT_NAME} --policy-text file://${ecr_repo_policy_json}
+    - docker push ${TEMPORAL_IMAGE}
+
+deploy-on-dev:
+  stage: release-to-dev
+  before_script:
+    - USED_AWS_ACCOUNT=${AWS_DEV_ACCOUNT}
+    - USED_DOCKER_REGISTRY=${TEMPORAL_DOCKER_REGISTRY}
+    - !reference [.aws-login, script]
+  script:
+    - echo Desplegando en el ambiente de Development
+    - USED_IMAGE=${TEMPORAL_IMAGE}
+    - USED_ENV=develop
+    - !reference [.ecs-update-service, script]
+
+approve-test-promotion:
+  stage: promote-to-test
+  script:
+    - echo Aprobando la promoción al ambiente de Testing
+  allow_failure: false
+  when: manual
+
+assure-final-repository:
+  stage: release-to-test
+  script:
+    - aws ecr describe-repositories --registry-id "${FINAL_REGISTRY_ID}" --repository-names ${CI_PROJECT_NAME} || aws ecr create-repository --repository-name ${CI_PROJECT_NAME} --image-tag-mutability IMMUTABLE --image-scanning-configuration scanOnPush=true && aws ecr set-repository-policy --repository-name ${CI_PROJECT_NAME} --policy-text file://${ecr_repo_policy_json}
+
+push-release-image:
+  stage: release-to-test
+  script:
+    - echo Recuperando imagen de la registry temporal ${TEMPORAL_DOCKER_REGISTRY}
+    - USED_AWS_ACCOUNT=${AWS_DEV_ACCOUNT}
+    - USED_DOCKER_REGISTRY=${TEMPORAL_DOCKER_REGISTRY}
+    - !reference [.aws-login, script]
+    - docker pull "${TEMPORAL_IMAGE}"
+    - docker tag "${TEMPORAL_IMAGE}" "${FINAL_IMAGE}"
+    - echo Publicando imagen a la registry compartida ${FINAL_DOCKER_REGISTRY}
+    - USED_DOCKER_REGISTRY=${FINAL_DOCKER_REGISTRY}
+    - !reference [.aws-docker-login, script]
+    - docker push ${FINAL_IMAGE}
+  needs:
+    - setup-variables
+    - assure-final-repository
+
+deploy-on-test:
+  stage: release-to-test
+  before_script:
+    - USED_AWS_ACCOUNT=${AWS_TEST_ACCOUNT}
+    - USED_DOCKER_REGISTRY=${FINAL_DOCKER_REGISTRY}
+    - !reference [.aws-login, script]
+  script:
+    - echo Desplegando en el ambiente de Testing
+    - USED_IMAGE=${FINAL_IMAGE}
+    - USED_ENV=testing
+    - !reference [.ecs-update-service, script]
+  needs:
+    - setup-variables
+    - push-release-image
+
+approve-prod-promotion:
+  stage: promote-to-prod
+  script:
+    - echo Aprobando la promoción al ambiente de Producción
+  allow_failure: false
+  when: manual
+
+deploy-on-prod:
+  stage: release-to-prod
+  before_script:
+    - USED_AWS_ACCOUNT=${AWS_PROD_ACCOUNT}
+    - USED_DOCKER_REGISTRY=${FINAL_DOCKER_REGISTRY}
+    - !reference [.aws-login, script]
+  script:
+    - echo Desplegando en el ambiente de Producción
+    - USED_IMAGE=${FINAL_IMAGE}
+    - USED_ENV=production
+    - !reference [.ecs-update-service, script]
+
+track-release:
+  stage: release-to-prod
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  script:
+    - echo "Generando registro del release a producción de ${VERSION} con la imagen ${FINAL_IMAGE}"
+  release:
+    name: "${CI_PROJECT_TITLE} - ${VERSION}"
+    tag_name: "${VERSION}"
+    description: "Imagen: ${FINAL_IMAGE}"
+
+.aws-login:
+  script:
+    - echo Haciendo login a la cuenta de AWS ${USED_AWS_ACCOUNT}
+    - ROLE=$(aws sts assume-role --role-arn "arn:aws:iam::${USED_AWS_ACCOUNT}:role/${TARGET_AWS_ROLE}" --role-session-name "AwsPipelineUser" --region "${AWS_DEFAULT_REGION}")
+    - export AWS_ACCESS_KEY_ID=$(echo ${ROLE} | jq -r .Credentials.AccessKeyId)
+    - export AWS_SECRET_ACCESS_KEY=$(echo ${ROLE} | jq -r .Credentials.SecretAccessKey)
+    - export AWS_SESSION_TOKEN=$(echo ${ROLE} | jq -r .Credentials.SessionToken)
+    - aws sts get-caller-identity
+    - !reference [.aws-docker-login, script]
+
+.aws-docker-login:
+  script:
+    - echo Haciendo login al registry de docker ${USED_DOCKER_REGISTRY}
+    - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${USED_DOCKER_REGISTRY}
+
+.ecs-update-service:
+  script:
+    - TMP=$(mktemp)
+    - echo Actualizando task-definition del ambiente ${USED_ENV} con la imagen ${USED_IMAGE}
+    - jq ".containerDefinitions[0].image = \"${USED_IMAGE}\"" ${PWD}/task-definition/task_definition_${USED_ENV}.json > "${TMP}" && mv "${TMP}" ${PWD}/task-definition/task_definition.json
+    - echo -e "Task Definition a utilizar\n$(cat ./task-definition/task_definition.json)"
+    - REVISION=$(aws ecs register-task-definition --cli-input-json file://task-definition/task_definition.json --region ${AWS_DEFAULT_REGION} | jq -r '.taskDefinition.taskDefinitionArn')
+    - echo "Revisión ${REVISION}"
+    - echo Actualizando ambiente ${USED_ENV}
+    - aws ecs update-service --cluster ${ECS_CLUSTER_NAME} --service ${CI_PROJECT_NAME} --task-definition ${REVISION}
+
+pages:
+  stage: validate
+  script:
+    - mkdir public
+    - cp -R results/* public/
+  artifacts:
+    when: always
+    paths:
+      - public
+
+include:
+  - project: "telecom-argentina/devops/cicd/templates"
+    ref: master
+    file:
+      # Verify
+      - "Security/scan-secrets.yml"
+      - "Linters/docker-linter.yml"

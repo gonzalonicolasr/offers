@@ -1,0 +1,14 @@
+# Manifestation file
+package-lock.json
+
+# Compiled output
+dist
+
+# Tests coverage
+coverage
+
+# Untracked files to ignore
+.gitignore
+
+# Markdown files
+*.md

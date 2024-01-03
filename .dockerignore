@@ -1,0 +1,20 @@
+# Dependencies
+node_modules
+
+# Compiled output
+dist
+
+# Tests coverage
+coverage
+
+# Container images
+Dockerfile
+.dockerignore
+
+# Version control
+.git
+.gitignore
+
+# IDEs
+.vscode
+.idea

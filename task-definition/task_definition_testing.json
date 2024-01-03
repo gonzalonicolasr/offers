@@ -1,0 +1,134 @@
+{
+  "family": "ag-highlighted-offers-task",
+  "taskRoleArn": "arn:aws:iam::769771297716:role/autogestion-ag-highlighted-offers-execution-role",
+  "networkMode": "awsvpc",
+  "volumes": [
+    {
+      "name": "oneagent"
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "ag-highlighted-offers",
+      "image": "IMAGE",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "hostPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "secretOptions": [],
+        "options": {
+          "awslogs-group": "ag-highlighted-offers",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "autogestion"
+        }
+      },
+      "essential": true,
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "us-east-1"
+        },
+        {
+          "name": "NODE_ENV",
+          "value": "test"
+        },
+        {
+          "name": "ENVIRONMENT",
+          "value": "development"
+        },
+        {
+          "name": "LD_PRELOAD",
+          "value": "/opt/dynatrace/oneagent/agent/lib64/liboneagentproc.so"
+        },
+        {
+          "name": "DT_CUSTOM_PROP",
+          "value": "Host_Group=AWS-ECS-FARGATE-SWITCH"
+        },
+        {
+          "name": "DT_LOGLEVELCON",
+          "value": "WARN"
+        }
+      ],
+      "ulimits": [
+        {
+          "hardLimit": 65536,
+          "name": "nofile",
+          "softLimit": 65536
+        }
+      ],
+      "dependsOn": [
+        {
+          "condition": "COMPLETE",
+          "containerName": "install-oneagent"
+        }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "oneagent",
+          "containerPath": "/opt/dynatrace/oneagent"
+        }
+      ]
+    },
+    {
+      "name": "install-oneagent",
+      "image": "890209685694.dkr.ecr.us-east-1.amazonaws.com/install-oneagent:1.0",
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "ag-highlighted-offers",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "autogestion"
+        }
+      },
+      "entryPoint": ["/bin/sh", "-c"],
+      "command": [
+        "ARCHIVE=$(mktemp) && wget -O $ARCHIVE \"$DT_API_URL/v1/deployment/installer/agent/unix/paas/latest?Api-Token=$DT_PAAS_TOKEN&$DT_ONEAGENT_OPTIONS\" && unzip -o -d /opt/dynatrace/oneagent $ARCHIVE && rm -f $ARCHIVE"
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "oneagent",
+          "containerPath": "/opt/dynatrace/oneagent"
+        }
+      ],
+      "essential": false,
+      "environment": [
+        {
+          "name": "DT_ONEAGENT_OPTIONS",
+          "value": "flavor=musl&include=all"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "DT_API_URL",
+          "valueFrom": "arn:aws:ssm:us-east-1:769771297716:parameter/ag/dynatrace/url"
+        },
+        {
+          "name": "DT_PAAS_TOKEN",
+          "valueFrom": "arn:aws:ssm:us-east-1:769771297716:parameter/ag/dynatrace/token"
+        }
+      ]
+    }
+  ],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::769771297716:role/autogestion-ag-highlighted-offers-execution-role",
+  "tags": [
+    { "key": "financial_team", "value": "finops@teco.com.ar" },
+    { "key": "technical_team", "value": "cmlopez@teco.com.ar" },
+    { "key": "sec_confidentiality", "value": "low" },
+    { "key": "finops_business", "value": "Digital Channel" },
+    { "key": "finops_cost_center", "value": "A00120613" },
+    { "key": "finops_budget_cod", "value": "cft-00026" },
+    { "key": "info_app", "value": "canalesdigitales_autogestion" },
+    { "key": "info_flow", "value": "ag-highlighted-offers" },
+    { "key": "info_name", "value": "autogestion-task" }
+  ]
+}
